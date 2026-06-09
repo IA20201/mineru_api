@@ -4,3 +4,11 @@ __pycache__/
 *.pyc
 .pi/*
 !.pi/skills/
+
+# 模型文件
+models/
+
+# 测试文件
+test_paper.pdf
+result.json
+*.md.bak
