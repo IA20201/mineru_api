@@ -2,4 +2,5 @@ output/
 .env
 __pycache__/
 *.pyc
-.pi/
+.pi/*
+!.pi/skills/
