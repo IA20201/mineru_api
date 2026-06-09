@@ -37,7 +37,10 @@ def _get_cloud_token() -> str:
 
 
 def _get_modal_key() -> str:
-    return os.getenv("MINERU_MODAL_API_KEY", "ld0OgOZOsgZUVqGtBDfETucAV2DSHt7HFC0A8XmeRLc")
+    key = os.getenv("MINERU_MODAL_API_KEY", "")
+    if not key:
+        raise RuntimeError("Modal API 需要配置 MINERU_MODAL_API_KEY")
+    return key
 
 
 # ── Modal API（本地部署）────────────────────────────────────────────────────
@@ -50,7 +53,7 @@ def _parse_via_modal(file_path: Path, is_ocr: bool, model: str) -> dict:
             headers={"X-API-Key": api_key},
             files={"file": (file_path.name, f, "application/pdf")},
             data={
-                "backend": model if model == "pipeline" else "pipeline",
+                "backend": model,
                 "is_ocr": str(is_ocr).lower(),
                 "enable_table": "true",
                 "enable_formula": "true",
@@ -272,7 +275,13 @@ def download_result(result_data: dict, output_dir: Path) -> Path:
 
     extract_dir = output_dir / "raw"
     extract_dir.mkdir(exist_ok=True)
+
+    # ZIP 安全校验（防止 Zip Slip 攻击）
     with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in zf.namelist():
+            member_path = (extract_dir / member).resolve()
+            if not str(member_path).startswith(str(extract_dir.resolve())):
+                raise RuntimeError(f"ZIP 条目路径不安全: {member}")
         zf.extractall(extract_dir)
 
     zip_path.unlink()
