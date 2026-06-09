@@ -1,25 +1,19 @@
 """MinerU Markdown 后处理：图片本地化、去重复页眉、清理格式。"""
 
 import re
+import shutil
 import urllib.parse
+from collections import Counter
 from pathlib import Path
 
 import requests
 
 # ── 配置 ─────────────────────────────────────────────────────────────────────
-# 需要删除的重复页眉/页脚模式（每行独立匹配，全文出现 ≥2 次即删除）
-# 支持：无#、#、##、### 等各种前缀
-REPEATED_HEADER_PATTERNS = [
-    r"^#{0,3}\s*工商管理\s*$",
-    r"^#{0,3}\s*管理世界\s*$",
-    r"^#{0,3}\s*南开管理评论\s*$",
-    r"^#{0,3}\s*科研管理\s*$",
-    r"^#{0,3}\s*科学学研究\s*$",
-    r"^#{0,3}\s*经济管理\s*$",
-    r"^#{0,3}\s*中国软科学\s*$",
-]
+# 重复页眉检测参数
+REPEATED_LINE_MIN_COUNT = 2   # 全文出现 ≥ 此次数即视为重复
+REPEATED_LINE_MAX_LEN = 30    # 去掉 # 前缀后，长度 ≤ 此值才视为页眉
 
-# 图片 URL 匹配正则
+# 图片 URL 匹配正则（支持 http/https）
 IMAGE_URL_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^\)]+)\)")
 
 
@@ -28,14 +22,22 @@ def download_images(md_text: str, images_dir: Path) -> str:
     """下载 Markdown 中所有远程图片到本地，返回替换后的文本。"""
     images_dir.mkdir(parents=True, exist_ok=True)
     replacements: dict[str, str] = {}
+    seen_filenames: set[str] = set()
 
     for match in IMAGE_URL_RE.finditer(md_text):
         alt, url = match.group(1), match.group(2)
         if url in replacements:
             continue
 
-        # 从 URL 提取文件名
         filename = _extract_filename(url)
+        # 处理同名文件：加短 hash 后缀
+        if filename in seen_filenames:
+            name_hash = str(hash(url))[-8:]
+            stem = Path(filename).stem
+            suffix = Path(filename).suffix
+            filename = f"{stem}_{name_hash}{suffix}"
+        seen_filenames.add(filename)
+
         local_path = images_dir / filename
 
         if not local_path.exists():
@@ -50,11 +52,9 @@ def download_images(md_text: str, images_dir: Path) -> str:
         else:
             print(f"  跳过已存在: {filename}")
 
-        # 替换为相对路径
         rel_path = f"images/{filename}"
         replacements[url] = rel_path
 
-    # 执行替换
     for url, rel in replacements.items():
         md_text = md_text.replace(url, rel)
 
@@ -71,36 +71,49 @@ def _extract_filename(url: str) -> str:
     return filename
 
 
-# ── 去重复页眉/页脚 ─────────────────────────────────────────────────────────
+# ── 去重复页眉/页脚（通用检测）──────────────────────────────────────────────
 def remove_repeated_headers(md_text: str) -> str:
-    """删除全文中出现 ≥2 次的期刊页眉行。"""
+    """自动检测并删除全文中重复出现的短行（页眉/页脚）。
+
+    规则：
+    - 去掉 # 前缀和空白后，长度 ≤ REPEATED_LINE_MAX_LEN 的行
+    - 全文出现 ≥ REPEATED_LINE_MIN_COUNT 次
+    - 排除空行和纯数字行
+    """
     lines = md_text.split("\n")
 
-    # 统计每个模式出现的次数
-    pattern_counts: dict[str, int] = {}
-    for pattern in REPEATED_HEADER_PATTERNS:
-        count = sum(1 for line in lines if re.match(pattern, line.strip()))
-        if count >= 2:
-            pattern_counts[pattern] = count
+    # 提取每行的"内容核心"（去掉 # 前缀和首尾空白）
+    def core_text(line: str) -> str:
+        return re.sub(r"^#{1,6}\s*", "", line.strip())
 
-    if not pattern_counts:
+    # 统计核心文本出现次数（只统计短行）
+    short_line_counts: Counter[str] = Counter()
+    for line in lines:
+        core = core_text(line)
+        if core and len(core) <= REPEATED_LINE_MAX_LEN and not core.isdigit():
+            short_line_counts[core] += 1
+
+    # 找出需要删除的核心文本
+    to_remove: set[str] = set()
+    for core, count in short_line_counts.items():
+        if count >= REPEATED_LINE_MIN_COUNT:
+            to_remove.add(core)
+
+    if not to_remove:
         return md_text
 
     # 删除匹配的行
     new_lines = []
     for line in lines:
-        should_remove = False
-        for pattern in pattern_counts:
-            if re.match(pattern, line.strip()):
-                should_remove = True
-                break
-        if not should_remove:
-            new_lines.append(line)
+        core = core_text(line)
+        if core in to_remove:
+            continue
+        new_lines.append(line)
 
     removed = len(lines) - len(new_lines)
-    for pat, cnt in pattern_counts.items():
-        print(f"  删除重复页眉 '{pat}': {cnt} 次")
-    print(f"  共删除 {removed} 行")
+    print(f"  检测到 {len(to_remove)} 种重复短行，共删除 {removed} 行")
+    for core in to_remove:
+        print(f"    - \"{core}\" ({short_line_counts[core]} 次)")
 
     return "\n".join(new_lines)
 
@@ -115,6 +128,33 @@ def clean_blank_lines(md_text: str, max_consecutive: int = 2) -> str:
     if diff > 0:
         print(f"  清理多余空行: 节省 {diff} 字符")
     return cleaned
+
+
+# ── 复制本地图片 ────────────────────────────────────────────────────────────
+def _copy_local_images(raw_dir: Path, images_dir: Path):
+    """复制 raw 目录中已有的本地图片到输出 images 目录。"""
+    images_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    # 只搜索 raw_dir 直接子目录中的 images/，避免误匹配输出目录
+    for src_images in raw_dir.rglob("images"):
+        if not src_images.is_dir():
+            continue
+        # 跳过输出目录自身的 images
+        try:
+            src_images.resolve().relative_to(images_dir.resolve())
+            continue
+        except ValueError:
+            pass
+
+        for img_file in src_images.iterdir():
+            if img_file.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                dst = images_dir / img_file.name
+                if not dst.exists():
+                    shutil.copy2(img_file, dst)
+                    copied += 1
+                    print(f"  复制图片: {img_file.name}")
+    if copied:
+        print(f"  共复制 {copied} 张本地图片")
 
 
 # ── 主处理流程 ──────────────────────────────────────────────────────────────
@@ -141,17 +181,16 @@ def postprocess(raw_dir: Path, output_dir: Path, paper_name: str) -> Path:
     md_path = md_files[0]
     print(f"\n📄 处理文件: {md_path.name}")
 
-    # 读取原始内容
     md_text = md_path.read_text(encoding="utf-8")
 
-    # 1. 下载图片并本地化（处理远程 URL）
+    # 1. 下载远程图片并本地化
     print("\n🖼️  图片本地化...")
     md_text = download_images(md_text, images_dir)
 
     # 1b. 复制 raw 目录中的本地图片到输出目录
     _copy_local_images(raw_dir, images_dir)
 
-    # 2. 去重复页眉/页脚
+    # 2. 去重复页眉/页脚（通用检测）
     print("\n🧹 去除重复页眉...")
     md_text = remove_repeated_headers(md_text)
 
@@ -165,22 +204,6 @@ def postprocess(raw_dir: Path, output_dir: Path, paper_name: str) -> Path:
     print(f"\n✅ 输出: {output_path}")
 
     return output_path
-
-
-def _copy_local_images(raw_dir: Path, images_dir: Path):
-    """复制 raw 目录中已有的本地图片到输出 images 目录。"""
-    import shutil
-    images_dir.mkdir(parents=True, exist_ok=True)
-    # 查找 raw 下所有 images 子目录
-    for src_images in raw_dir.rglob("images"):
-        if not src_images.is_dir():
-            continue
-        for img_file in src_images.iterdir():
-            if img_file.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
-                dst = images_dir / img_file.name
-                if not dst.exists():
-                    shutil.copy2(img_file, dst)
-                    print(f"  复制图片: {img_file.name}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

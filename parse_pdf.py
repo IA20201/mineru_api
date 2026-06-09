@@ -17,13 +17,16 @@ load_dotenv(override=True)
 
 API_BASE = "https://mineru.net/api/v4"
 AGENT_API_BASE = "https://mineru.net/api/v1/agent"
-TOKEN = os.getenv("MINERU_API_TOKEN", "")
+
+
+def _get_token() -> str:
+    return os.getenv("MINERU_API_TOKEN", "")
 
 
 def _auth_headers() -> dict:
     return {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {TOKEN}",
+        "Authorization": f"Bearer {_get_token()}",
     }
 
 
@@ -232,7 +235,7 @@ def _print_progress(result: dict, interval: int):
 
 
 def download_result(result_data: dict, output_dir: Path) -> Path:
-    """下载 zip 结果并解压，返回解压目录。"""
+    """下载 zip 结果并解压，返回解压目录。流式写入避免大文件 OOM。"""
     zip_url = result_data.get("full_zip_url")
     if not zip_url:
         raise RuntimeError(f"未找到 zip 下载链接: {result_data}")
@@ -241,9 +244,11 @@ def download_result(result_data: dict, output_dir: Path) -> Path:
     zip_path = output_dir / "result.zip"
 
     print(f"[MinerU] 下载结果...")
-    resp = requests.get(zip_url, timeout=120)
-    resp.raise_for_status()
-    zip_path.write_bytes(resp.content)
+    with requests.get(zip_url, timeout=120, stream=True) as resp:
+        resp.raise_for_status()
+        with open(zip_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
 
     extract_dir = output_dir / "raw"
     extract_dir.mkdir(exist_ok=True)
@@ -271,24 +276,28 @@ def parse_pdf(
     is_url = source.startswith("http://") or source.startswith("https://")
     file_path = None if is_url else Path(source)
 
-    # 检查文件大小（Agent API 限制 10MB）
-    if file_path and file_path.exists():
-        size_mb = file_path.stat().st_size / 1024 / 1024
-    else:
-        size_mb = 0
+    # 校验本地文件存在性
+    if file_path and not file_path.exists():
+        raise FileNotFoundError(f"文件不存在: {file_path}")
 
-    # 尝试精准 API → 降级 Agent API
-    use_auth = bool(TOKEN and len(TOKEN) > 50)
+    # 检查文件大小（Agent API 限制 10MB）
+    size_mb = file_path.stat().st_size / 1024 / 1024 if file_path else 0
+
+    token = _get_token()
+    use_auth = bool(token and len(token) > 50)
     task_or_batch_id = None
     is_batch = False
+    submitted_via_auth = False  # 记录实际提交方式
 
     if use_auth:
         try:
             if is_url:
                 task_or_batch_id = _submit_url_auth(source, is_ocr, model)
+                submitted_via_auth = True
             else:
                 task_or_batch_id = _submit_file_auth(file_path, is_ocr, model)
                 is_batch = True
+                submitted_via_auth = True
         except Exception as e:
             print(f"[MinerU] 精准 API 失败 ({e})，降级到 Agent API...")
 
@@ -302,10 +311,10 @@ def parse_pdf(
         else:
             task_or_batch_id = _submit_file_agent(file_path, is_ocr, model)
 
-    # 轮询结果
-    if is_batch:
+    # 轮询结果：根据实际提交方式选择轮询函数
+    if submitted_via_auth and is_batch:
         result = _poll_auth_batch(task_or_batch_id, poll_interval, timeout)
-    elif use_auth and not is_batch:
+    elif submitted_via_auth:
         result = _poll_auth_task(task_or_batch_id, poll_interval, timeout)
     else:
         result = _poll_agent_task(task_or_batch_id, poll_interval, timeout)

@@ -13,6 +13,7 @@ def run(
     paper_name: str,
     is_ocr: bool = False,
     model: str = "vlm",
+    timeout: int = 600,
 ) -> Path:
     """完整流程：解析 PDF → 后处理 → 输出。"""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -26,6 +27,7 @@ def run(
         output_dir=output_dir / "raw",
         is_ocr=is_ocr,
         model=model,
+        timeout=timeout,
     )
 
     # 2. 后处理
@@ -54,6 +56,7 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--name", required=True, help="论文名称")
     parser.add_argument("--ocr", action="store_true", help="启用 OCR")
     parser.add_argument("--model", default="vlm", choices=["pipeline", "vlm"])
+    parser.add_argument("--timeout", type=int, default=600, help="超时秒数")
     args = parser.parse_args()
 
     run(
@@ -62,4 +65,5 @@ if __name__ == "__main__":
         paper_name=args.name,
         is_ocr=args.ocr,
         model=args.model,
+        timeout=args.timeout,
     )
