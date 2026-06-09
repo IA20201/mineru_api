@@ -141,9 +141,12 @@ def postprocess(raw_dir: Path, output_dir: Path, paper_name: str) -> Path:
     # 读取原始内容
     md_text = md_path.read_text(encoding="utf-8")
 
-    # 1. 下载图片并本地化
+    # 1. 下载图片并本地化（处理远程 URL）
     print("\n🖼️  图片本地化...")
     md_text = download_images(md_text, images_dir)
+
+    # 1b. 复制 raw 目录中的本地图片到输出目录
+    _copy_local_images(raw_dir, images_dir)
 
     # 2. 去重复页眉/页脚
     print("\n🧹 去除重复页眉...")
@@ -159,6 +162,22 @@ def postprocess(raw_dir: Path, output_dir: Path, paper_name: str) -> Path:
     print(f"\n✅ 输出: {output_path}")
 
     return output_path
+
+
+def _copy_local_images(raw_dir: Path, images_dir: Path):
+    """复制 raw 目录中已有的本地图片到输出 images 目录。"""
+    import shutil
+    images_dir.mkdir(parents=True, exist_ok=True)
+    # 查找 raw 下所有 images 子目录
+    for src_images in raw_dir.rglob("images"):
+        if not src_images.is_dir():
+            continue
+        for img_file in src_images.iterdir():
+            if img_file.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'):
+                dst = images_dir / img_file.name
+                if not dst.exists():
+                    shutil.copy2(img_file, dst)
+                    print(f"  复制图片: {img_file.name}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
