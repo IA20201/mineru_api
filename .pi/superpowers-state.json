@@ -29,9 +29,7 @@
   "tdd": {
     "phase": "idle",
     "testFiles": [],
-    "sourceFiles": [
-      "D:/MyProjects/mineru_api/postprocess.py"
-    ],
+    "sourceFiles": [],
     "redVerificationPending": false
   },
   "debug": {

@@ -1,0 +1,9 @@
+[project]
+name = "mineru-api"
+version = "0.1.0"
+description = "MinerU 云端 API PDF 解析 + 后处理脚本"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28",
+    "python-dotenv>=1.0",
+]
