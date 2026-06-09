@@ -10,8 +10,19 @@ import requests
 
 # ── 配置 ─────────────────────────────────────────────────────────────────────
 # 重复页眉检测参数
-REPEATED_LINE_MIN_COUNT = 2   # 全文出现 ≥ 此次数即视为重复
+REPEATED_LINE_MIN_COUNT = 3   # 全文出现 ≥ 此次数即视为重复（≥3 避免误删短标题）
 REPEATED_LINE_MAX_LEN = 30    # 去掉 # 前缀后，长度 ≤ 此值才视为页眉
+
+# 白名单：这些短行即使重复出现也不删除（论文常见章节标题）
+HEADER_WHITELIST: set[str] = {
+    "摘要", "Abstract", "ABSTRACT",
+    "引言", "Introduction",
+    "结论", "Conclusion", "Conclusions",
+    "参考文献", "References",
+    "致谢", "Acknowledgments",
+    "附录", "Appendix",
+    "目录", "Table of Contents",
+}
 
 # 图片 URL 匹配正则（支持 http/https）
 IMAGE_URL_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^\)]+)\)")
@@ -86,11 +97,11 @@ def remove_repeated_headers(md_text: str) -> str:
     def core_text(line: str) -> str:
         return re.sub(r"^#{1,6}\s*", "", line.strip())
 
-    # 统计核心文本出现次数（只统计短行）
+    # 统计核心文本出现次数（只统计短行，排除白名单）
     short_line_counts: Counter[str] = Counter()
     for line in lines:
         core = core_text(line)
-        if core and len(core) <= REPEATED_LINE_MAX_LEN and not core.isdigit():
+        if core and len(core) <= REPEATED_LINE_MAX_LEN and not core.isdigit() and core not in HEADER_WHITELIST:
             short_line_counts[core] += 1
 
     # 找出需要删除的核心文本

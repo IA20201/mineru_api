@@ -30,9 +30,7 @@
     "phase": "idle",
     "testFiles": [],
     "sourceFiles": [
-      "D:/MyProjects/mineru_api/parse_pdf.py",
-      "D:/MyProjects/mineru_api/postprocess.py",
-      "D:/MyProjects/mineru_api/run.py"
+      "D:/MyProjects/mineru_api/postprocess.py"
     ],
     "redVerificationPending": false
   },
