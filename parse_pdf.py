@@ -1,8 +1,14 @@
-"""调用 MinerU 云端 API 解析 PDF，支持 URL 和本地文件两种模式。
+"""调用 MinerU API 解析 PDF，支持三种 API 来源可切换。
 
-API 优先级：
-1. 精准解析 API（需 Token）— 支持 200MB/200页
-2. Agent 轻量 API（免登录）— 支持 10MB/20页，自动降级
+API 来源优先级（可通过 MINERU_API_SOURCE 环境变量切换）：
+1. modal  — Modal 本地部署（最稳定，需部署）
+2. cloud  — MinerU 云端精准 API（需 Token）
+3. agent  — MinerU Agent API（免登录，限制 10MB/20页）
+
+环境变量配置（.env 文件）：
+    MINERU_API_SOURCE=modal|cloud|agent  # 切换 API 来源，默认 modal
+    MINERU_API_TOKEN=xxx                 # 云端 API Token（cloud 模式必需）
+    MINERU_MODAL_API_KEY=xxx             # Modal API Key（modal 模式必需）
 """
 
 import os
@@ -15,24 +21,59 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-API_BASE = "https://mineru.net/api/v4"
+# ── API 配置 ─────────────────────────────────────────────────────────────────
+MODAL_API_URL = "https://jhdhhu58--mineru-api-fastapi-app.modal.run"
+CLOUD_API_BASE = "https://mineru.net/api/v4"
 AGENT_API_BASE = "https://mineru.net/api/v1/agent"
 
 
-def _get_token() -> str:
+def _get_api_source() -> str:
+    """获取 API 来源：modal / cloud / agent"""
+    return os.getenv("MINERU_API_SOURCE", "modal").lower()
+
+
+def _get_cloud_token() -> str:
     return os.getenv("MINERU_API_TOKEN", "")
 
 
+def _get_modal_key() -> str:
+    return os.getenv("MINERU_MODAL_API_KEY", "ld0OgOZOsgZUVqGtBDfETucAV2DSHt7HFC0A8XmeRLc")
+
+
+# ── Modal API（本地部署）────────────────────────────────────────────────────
+def _parse_via_modal(file_path: Path, is_ocr: bool, model: str) -> dict:
+    """通过 Modal API 解析 PDF，返回结果字典。"""
+    api_key = _get_modal_key()
+    with open(file_path, "rb") as f:
+        resp = requests.post(
+            f"{MODAL_API_URL}/parse",
+            headers={"X-API-Key": api_key},
+            files={"file": (file_path.name, f, "application/pdf")},
+            data={
+                "backend": model if model == "pipeline" else "pipeline",
+                "is_ocr": str(is_ocr).lower(),
+                "enable_table": "true",
+                "enable_formula": "true",
+                "language": "ch",
+            },
+            timeout=600,
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        raise RuntimeError(f"Modal API 失败: {data.get('error', '未知错误')}")
+    return data
+
+
+# ── 云端 API（精准解析）────────────────────────────────────────────────────
 def _auth_headers() -> dict:
     return {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {_get_token()}",
+        "Authorization": f"Bearer {_get_cloud_token()}",
     }
 
 
-# ── 精准解析 API（需 Token）──────────────────────────────────────────────────
-def _submit_url_auth(pdf_url: str, is_ocr: bool, model: str) -> str:
-    """通过 URL + 精准 API 提交任务，返回 task_id。"""
+def _submit_url_cloud(pdf_url: str, is_ocr: bool, model: str) -> str:
     payload = {
         "url": pdf_url,
         "is_ocr": is_ocr,
@@ -42,19 +83,18 @@ def _submit_url_auth(pdf_url: str, is_ocr: bool, model: str) -> str:
         "model_version": model,
     }
     resp = requests.post(
-        f"{API_BASE}/extract/task", json=payload, headers=_auth_headers(), timeout=30
+        f"{CLOUD_API_BASE}/extract/task", json=payload, headers=_auth_headers(), timeout=30
     )
     resp.raise_for_status()
     data = resp.json()
     if data.get("code") != 0:
         raise RuntimeError(f"提交任务失败: {data}")
     task_id = data["data"]["task_id"]
-    print(f"[精准API] URL 任务已提交: {task_id}")
+    print(f"[云端API] URL 任务已提交: {task_id}")
     return task_id
 
 
-def _submit_file_auth(file_path: Path, is_ocr: bool, model: str) -> str:
-    """上传本地文件 + 精准 API，返回 batch_id。"""
+def _submit_file_cloud(file_path: Path, is_ocr: bool, model: str) -> str:
     payload = {
         "files": [{
             "name": file_path.name,
@@ -65,7 +105,7 @@ def _submit_file_auth(file_path: Path, is_ocr: bool, model: str) -> str:
         }]
     }
     resp = requests.post(
-        f"{API_BASE}/file-urls/batch", json=payload, headers=_auth_headers(), timeout=30
+        f"{CLOUD_API_BASE}/file-urls/batch", json=payload, headers=_auth_headers(), timeout=30
     )
     resp.raise_for_status()
     data = resp.json()
@@ -74,15 +114,14 @@ def _submit_file_auth(file_path: Path, is_ocr: bool, model: str) -> str:
 
     batch_id = data["data"]["batch_id"]
     upload_url = data["data"]["file_urls"][0]
-    print(f"[精准API] 批次已创建: {batch_id}")
+    print(f"[云端API] 批次已创建: {batch_id}")
 
     _upload_file(file_path, upload_url)
     return batch_id
 
 
-# ── Agent 轻量 API（免登录）─────────────────────────────────────────────────
+# ── Agent API（免登录）─────────────────────────────────────────────────────
 def _submit_file_agent(file_path: Path, is_ocr: bool, model: str) -> str:
-    """上传本地文件 + Agent API（免 Token），返回 task_id。"""
     payload = {
         "file_name": file_path.name,
         "language": "ch",
@@ -107,7 +146,6 @@ def _submit_file_agent(file_path: Path, is_ocr: bool, model: str) -> str:
 
 
 def _submit_url_agent(pdf_url: str, is_ocr: bool, model: str) -> str:
-    """通过 URL + Agent API 提交任务，返回 task_id。"""
     payload = {
         "url": pdf_url,
         "language": "ch",
@@ -130,7 +168,6 @@ def _submit_url_agent(pdf_url: str, is_ocr: bool, model: str) -> str:
 
 # ── 通用工具 ─────────────────────────────────────────────────────────────────
 def _upload_file(file_path: Path, upload_url: str):
-    """PUT 上传文件到 OSS。"""
     size_mb = file_path.stat().st_size / 1024 / 1024
     print(f"[MinerU] 上传文件: {file_path.name} ({size_mb:.1f} MB)")
     with open(file_path, "rb") as f:
@@ -139,13 +176,12 @@ def _upload_file(file_path: Path, upload_url: str):
     print(f"[MinerU] 上传完成")
 
 
-# ── 轮询：精准 API ─────────────────────────────────────────────────────────
-def _poll_auth_task(task_id: str, interval: int, timeout: int) -> dict:
-    """轮询精准 API 的单文件任务。"""
+# ── 轮询 ─────────────────────────────────────────────────────────────────────
+def _poll_cloud_task(task_id: str, interval: int, timeout: int) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = requests.get(
-            f"{API_BASE}/extract/task/{task_id}",
+            f"{CLOUD_API_BASE}/extract/task/{task_id}",
             headers=_auth_headers(), timeout=30,
         )
         resp.raise_for_status()
@@ -159,18 +195,15 @@ def _poll_auth_task(task_id: str, interval: int, timeout: int) -> dict:
             elif state == "failed":
                 raise RuntimeError(f"任务失败: {result}")
             _print_progress(result, interval)
-        else:
-            print(f"[MinerU] 查询中，等待 {interval}s ...")
         time.sleep(interval)
     raise TimeoutError(f"任务 {task_id} 超时（{timeout}s）")
 
 
-def _poll_auth_batch(batch_id: str, interval: int, timeout: int) -> dict:
-    """轮询精准 API 的批量任务，返回第一个文件的结果。"""
+def _poll_cloud_batch(batch_id: str, interval: int, timeout: int) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = requests.get(
-            f"{API_BASE}/extract-results/batch/{batch_id}",
+            f"{CLOUD_API_BASE}/extract-results/batch/{batch_id}",
             headers=_auth_headers(), timeout=30,
         )
         resp.raise_for_status()
@@ -186,17 +219,11 @@ def _poll_auth_batch(batch_id: str, interval: int, timeout: int) -> dict:
                 elif state == "failed":
                     raise RuntimeError(f"任务失败: {first}")
                 _print_progress(first, interval)
-            else:
-                print(f"[MinerU] 等待结果，{interval}s ...")
-        else:
-            print(f"[MinerU] 查询中，{interval}s ...")
         time.sleep(interval)
     raise TimeoutError(f"批次 {batch_id} 超时（{timeout}s）")
 
 
-# ── 轮询：Agent API ─────────────────────────────────────────────────────────
 def _poll_agent_task(task_id: str, interval: int, timeout: int) -> dict:
-    """轮询 Agent API 任务。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = requests.get(
@@ -214,28 +241,21 @@ def _poll_agent_task(task_id: str, interval: int, timeout: int) -> dict:
                 elif state == "failed":
                     raise RuntimeError(f"任务失败: {result}")
                 _print_progress(result, interval)
-            else:
-                print(f"[MinerU] 查询中，{interval}s ...")
-        else:
-            print(f"[MinerU] 查询中（{resp.status_code}），{interval}s ...")
         time.sleep(interval)
     raise TimeoutError(f"任务 {task_id} 超时（{timeout}s）")
 
 
 def _print_progress(result: dict, interval: int):
-    """打印解析进度。"""
     progress = result.get("extract_progress", {})
-    state = result.get("state", "running")
     if progress:
         extracted = progress.get("extracted_pages", 0)
         total = progress.get("total_pages", 0)
         print(f"[MinerU] 解析中: {extracted}/{total} 页")
     else:
-        print(f"[MinerU] 状态: {state}，等待 {interval}s ...")
+        print(f"[MinerU] 等待中，{interval}s ...")
 
 
 def download_result(result_data: dict, output_dir: Path) -> Path:
-    """下载 zip 结果并解压，返回解压目录。流式写入避免大文件 OOM。"""
     zip_url = result_data.get("full_zip_url")
     if not zip_url:
         raise RuntimeError(f"未找到 zip 下载链接: {result_data}")
@@ -268,54 +288,69 @@ def parse_pdf(
     model: str = "vlm",
     poll_interval: int = 5,
     timeout: int = 600,
+    api_source: str = None,  # 可覆盖环境变量
 ) -> Path:
-    """完整流程：提交 → 轮询 → 下载 → 解压。返回解压目录。
+    """完整流程：解析 PDF 并返回结果目录。
 
-    优先使用精准 API（需 Token），Token 无效时自动降级到 Agent API。
+    Args:
+        api_source: 强制指定 API 来源 (modal/cloud/agent)，None 则用环境变量
     """
     is_url = source.startswith("http://") or source.startswith("https://")
     file_path = None if is_url else Path(source)
 
-    # 校验本地文件存在性
     if file_path and not file_path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
 
-    # 检查文件大小（Agent API 限制 10MB）
-    size_mb = file_path.stat().st_size / 1024 / 1024 if file_path else 0
+    source_type = api_source or _get_api_source()
+    print(f"[MinerU] 使用 API: {source_type}")
 
-    token = _get_token()
-    use_auth = bool(token and len(token) > 50)
+    # ── Modal API ─────────────────────────────────────────────────────────
+    if source_type == "modal":
+        if is_url:
+            raise ValueError("Modal API 暂不支持 URL，请使用本地文件")
+        result_data = _parse_via_modal(file_path, is_ocr, model)
+        # Modal API 直接返回 markdown，不需要下载 zip
+        md_path = output_dir / f"{file_path.stem}.md"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(result_data["markdown"], encoding="utf-8")
+        print(f"[Modal] 解析完成，Markdown 已保存到: {md_path}")
+        return output_dir
+
+    # ── 云端 / Agent API ──────────────────────────────────────────────────
+    size_mb = file_path.stat().st_size / 1024 / 1024 if file_path else 0
     task_or_batch_id = None
     is_batch = False
-    submitted_via_auth = False  # 记录实际提交方式
+    submitted_via_cloud = False
 
-    if use_auth:
+    if source_type == "cloud":
+        token = _get_cloud_token()
+        if not token or len(token) < 50:
+            raise RuntimeError("云端 API 需要配置 MINERU_API_TOKEN")
         try:
             if is_url:
-                task_or_batch_id = _submit_url_auth(source, is_ocr, model)
-                submitted_via_auth = True
+                task_or_batch_id = _submit_url_cloud(source, is_ocr, model)
             else:
-                task_or_batch_id = _submit_file_auth(file_path, is_ocr, model)
+                task_or_batch_id = _submit_file_cloud(file_path, is_ocr, model)
                 is_batch = True
-                submitted_via_auth = True
+            submitted_via_cloud = True
         except Exception as e:
-            print(f"[MinerU] 精准 API 失败 ({e})，降级到 Agent API...")
+            print(f"[MinerU] 云端 API 失败 ({e})，降级到 Agent API...")
 
     if task_or_batch_id is None:
         if file_path and size_mb > 10:
             raise RuntimeError(
-                f"文件 {size_mb:.1f}MB 超过 Agent API 限制(10MB)，请配置有效的 MINERU_API_TOKEN"
+                f"文件 {size_mb:.1f}MB 超过 Agent API 限制(10MB)，请使用 modal 或 cloud API"
             )
         if is_url:
             task_or_batch_id = _submit_url_agent(source, is_ocr, model)
         else:
             task_or_batch_id = _submit_file_agent(file_path, is_ocr, model)
 
-    # 轮询结果：根据实际提交方式选择轮询函数
-    if submitted_via_auth and is_batch:
-        result = _poll_auth_batch(task_or_batch_id, poll_interval, timeout)
-    elif submitted_via_auth:
-        result = _poll_auth_task(task_or_batch_id, poll_interval, timeout)
+    # 轮询结果
+    if submitted_via_cloud and is_batch:
+        result = _poll_cloud_batch(task_or_batch_id, poll_interval, timeout)
+    elif submitted_via_cloud:
+        result = _poll_cloud_task(task_or_batch_id, poll_interval, timeout)
     else:
         result = _poll_agent_task(task_or_batch_id, poll_interval, timeout)
 
@@ -326,19 +361,21 @@ def parse_pdf(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="MinerU 云端 PDF 解析")
+    parser = argparse.ArgumentParser(description="MinerU PDF 解析（支持三种 API）")
     parser.add_argument("source", help="PDF 文件路径或 URL")
     parser.add_argument("-o", "--output", default="./output", help="输出目录")
     parser.add_argument("--ocr", action="store_true", help="启用 OCR")
     parser.add_argument("--model", default="vlm", choices=["pipeline", "vlm"])
     parser.add_argument("--timeout", type=int, default=600, help="超时秒数")
+    parser.add_argument("--api", choices=["modal", "cloud", "agent"], help="指定 API 来源")
     args = parser.parse_args()
 
-    extract_dir = parse_pdf(
+    result_dir = parse_pdf(
         source=args.source,
         output_dir=Path(args.output),
         is_ocr=args.ocr,
         model=args.model,
         timeout=args.timeout,
+        api_source=args.api,
     )
-    print(f"\n✅ 解析完成，原始文件在: {extract_dir}")
+    print(f"\n✅ 解析完成，结果在: {result_dir}")
