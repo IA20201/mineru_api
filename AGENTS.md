@@ -53,8 +53,8 @@ modal app logs mineru-api --tail 20
 
 | 来源 | 环境变量 | 命令行 | 说明 |
 |------|----------|--------|------|
-| **modal** | `MINERU_API_SOURCE=modal` | `--api modal` | Modal 本地部署（默认） |
-| **cloud** | `MINERU_API_SOURCE=cloud` | `--api cloud` | MinerU 云端 API |
+| **cloud** | `MINERU_API_SOURCE=cloud` | `--api cloud` | MinerU 云端 API（默认） |
+| **modal** | `MINERU_API_SOURCE=modal` | `--api modal` | Modal 本地部署 |
 | **agent** | `MINERU_API_SOURCE=agent` | `--api agent` | Agent API（免登录） |
 
 ## API 调用流程
@@ -112,10 +112,10 @@ modal app stop mineru-api -y
 # MinerU 官方 Token（cloud 模式需要）
 MINERU_API_TOKEN=xxx
 
-# API 来源：modal / cloud / agent
-MINERU_API_SOURCE=modal
+# API 来源：cloud / modal / agent
+MINERU_API_SOURCE=cloud
 
-# Modal API Key
+# Modal API Key（modal 模式需要）
 MINERU_MODAL_API_KEY=xxx
 ```
 

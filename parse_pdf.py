@@ -29,7 +29,7 @@ AGENT_API_BASE = "https://mineru.net/api/v1/agent"
 
 def _get_api_source() -> str:
     """获取 API 来源：modal / cloud / agent"""
-    return os.getenv("MINERU_API_SOURCE", "modal").lower()
+    return os.getenv("MINERU_API_SOURCE", "cloud").lower()
 
 
 def _get_cloud_token() -> str:
